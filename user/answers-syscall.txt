@@ -1,0 +1,368 @@
+# xv6 syscall GDB Lab Answers
+
+## 1. Looking at the backtrace output, which function called syscall?
+
+### GDB Commands
+
+```gdb
+(gdb) b syscall
+(gdb) c
+(gdb) bt
+```
+
+### Answer
+
+The function that called `syscall` is:
+
+```
+usertrap()
+```
+
+### 中文解释
+
+通过 `backtrace`（调用栈回溯）可以看到：
+
+```
+user program
+      |
+     ecall
+      |
+  usertrap()
+      |
+   syscall()
+```
+
+因此 `syscall()` 的直接调用者是 `usertrap()`。
+
+---
+
+# 2. What is the value of p->trapframe->a7 and what does that value represent?
+
+### GDB Commands
+
+首先单步经过：
+
+```c
+struct proc *p = myproc();
+```
+
+使用：
+
+```gdb
+(gdb) n
+(gdb) p /x *p
+```
+
+查看：
+
+```
+trapframe
+    |
+    a7
+```
+
+### Answer
+
+The value of `p->trapframe->a7` is:
+
+```
+0x7
+```
+
+It represents the system call number stored in register `a7` by the user program before executing the `ecall` instruction.
+
+
+`a7` 是 RISC-V 中用于传递系统调用编号的寄存器。
+
+用户程序执行：
+
+```asm
+li a7, syscall_number
+ecall
+```
+
+进入 kernel 后，xv6 从：
+
+```
+p->trapframe->a7
+```
+
+读取系统调用编号。
+
+---
+
+# 3. What was the previous mode that the CPU was in?
+
+### GDB Commands
+
+```gdb
+(gdb) p /x $sstatus
+```
+
+查看 `sstatus` 中的 SPP 位。
+
+### Answer
+
+The previous CPU mode was:
+
+```
+user mode
+```
+
+
+CPU 当前运行在：
+
+```
+supervisor mode
+```
+
+也就是 kernel mode。
+
+但是进入 kernel 之前，CPU 位于：
+
+```
+user mode
+```
+
+原因：
+
+用户程序执行：
+
+```
+ecall
+```
+
+触发：
+
+```
+user mode → supervisor mode
+```
+
+---
+
+# 4. Write down the assembly instruction the kernel is panicking at. Which register corresponds to the variable num?
+
+### Steps
+
+修改：
+
+```c
+num = p->trapframe->a7;
+```
+
+为：
+
+```c
+num = *(int *)0;
+```
+
+运行：
+
+```bash
+make qemu
+```
+
+查看 panic 输出：
+
+```
+sepc=xxxx
+```
+
+然后在：
+
+```
+kernel/kernel.asm
+```
+
+中搜索对应地址。
+
+### Answer
+
+The kernel panics at the assembly instruction:
+
+```asm
+ld a5,0(a5)
+```
+
+The variable `num` corresponds to:
+
+```
+register a5
+```
+
+`sepc` 保存发生异常时 CPU 正在执行的指令地址。
+
+通过查找：
+
+```
+kernel/kernel.asm
+```
+
+可以找到对应汇编。
+
+这里：
+
+```c
+*(int *)0
+```
+
+会导致 CPU 尝试从地址 0 加载数据。
+
+---
+
+# 5. Confirm that the faulting assembly instruction is the same as the one found above.
+
+### GDB Commands
+
+```gdb
+(gdb) b *0x80001bfe
+(gdb) layout asm
+(gdb) c
+```
+
+### Answer
+
+The faulting assembly instruction is the same as the instruction found in `kernel/kernel.asm`.
+
+
+通过 GDB 在异常地址设置断点，可以确认：
+
+GDB 中 CPU 停止的位置：
+
+和：
+
+```
+kernel/kernel.asm
+```
+
+中的错误指令一致。
+
+
+---
+
+# 6. Why does the kernel crash?
+
+### Answer
+
+The kernel crashes because it accesses virtual address `0`, which is not mapped in the kernel address space.
+
+The value:
+
+```
+scause = 0xd
+```
+
+indicates a load page fault.
+
+
+代码：
+
+```c
+*(int *)0
+```
+
+等价于：
+
+```c
+int *ptr = 0;
+read ptr;
+```
+
+访问：
+
+```
+virtual address 0x0
+```
+
+但是 kernel page table 没有映射该地址。
+
+因此发生：
+
+```
+Load page fault
+```
+
+RISC-V:
+
+```
+scause = 13 (0xd)
+```
+
+表示：
+
+```
+Load page fault
+```
+
+---
+
+# 7. What is the name of the process that was running when the kernel panicked? What is its pid?
+
+### GDB Commands
+
+```gdb
+(gdb) p p->name
+(gdb) p p->pid
+```
+
+### Answer
+
+The process was:
+
+```
+init
+```
+
+and its pid was:
+
+```
+1
+```
+
+
+panic 发生时运行的是 xv6 第一个用户进程：
+
+```
+process name: init
+pid: 1
+```
+
+---
+
+# Summary
+
+This lab teaches how to debug xv6 kernel execution:
+
+```
+User program
+      |
+     ecall
+      |
+      ↓
+ Trap mechanism
+      |
+      ↓
+ usertrap()
+      |
+      ↓
+ syscall()
+      |
+      ↓
+ kernel execution
+```
+
+核心调试流程：
+
+```
+C code
+  ↓
+GDB breakpoint
+  ↓
+backtrace
+  ↓
+register inspection
+  ↓
+assembly inspection
+  ↓
+locate kernel bug
+```
