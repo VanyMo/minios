@@ -168,6 +168,12 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  // [新增] 进程退出时清零追踪掩码。
+  // freeproc() 是逐字段清理而非 memset 整个结构体，若不清零，
+  // 当这个 proc 槽位之后被 allocproc() 分配给一个全新进程时，
+  // 新进程会"继承"上一个已退出进程的掩码，导致不该被追踪的进程
+  // 被追踪打印（违背"不影响其他进程"的要求）。
+  p->trace_mask = 0;
   p->state = UNUSED;
 }
 
@@ -307,6 +313,13 @@ fork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
+
+  // [新增] 把父进程的追踪掩码复制给子进程。
+  // 作业要求：trace "对其后 fork 出的子进程同样生效"。
+  // 掩码是进程属性，exec 不会重建 proc 结构（只替换内存映像），
+  // 所以只需在 fork 这一个创建进程的入口复制，子孙后代便层层继承；
+  // 而其他无关进程的掩码仍为 0，不受影响。
+  np->trace_mask = p->trace_mask;
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
