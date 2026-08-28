@@ -101,6 +101,9 @@ extern uint64 sys_unlink(void);
 extern uint64 sys_link(void);
 extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
+// [新增] sys_trace() 的函数原型声明（实现在 kernel/sysproc.c 中）。
+// syscall() 分发函数通过下面的 syscalls[] 表间接引用它，编译器需要此声明。
+extern uint64 sys_trace(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -126,6 +129,39 @@ static uint64 (*syscalls[])(void) = {
 [SYS_link]    sys_link,
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
+// [新增] 把 SYS_trace(22) 映射到 sys_trace 处理函数。
+// 指定初始化器（designated initializer）方式保证表下标与系统调用号严格对齐，
+// 未赋值的表项（下标 0）自动为 NULL，syscall() 会将其识别为非法调用号。
+[SYS_trace]   sys_trace,
+};
+
+// [新增] 系统调用名字符串数组：下标 = 系统调用号，值 = 可打印的名字。
+// 专门服务于 trace 功能——打印 "%d: syscall %s -> %d" 时需要把调用号 num
+// 翻译成人类可读的名字（如 5 -> "read"）。表项顺序必须与 kernel/syscall.h
+// 中的编号完全一致。
+static char *syscall_names[] = {
+[SYS_fork]    "fork",
+[SYS_exit]    "exit",
+[SYS_wait]    "wait",
+[SYS_pipe]    "pipe",
+[SYS_read]    "read",
+[SYS_kill]    "kill",
+[SYS_exec]    "exec",
+[SYS_fstat]   "fstat",
+[SYS_chdir]   "chdir",
+[SYS_dup]     "dup",
+[SYS_getpid]  "getpid",
+[SYS_sbrk]    "sbrk",
+[SYS_sleep]   "sleep",
+[SYS_uptime]  "uptime",
+[SYS_open]    "open",
+[SYS_write]   "write",
+[SYS_mknod]   "mknod",
+[SYS_unlink]  "unlink",
+[SYS_link]    "link",
+[SYS_mkdir]   "mkdir",
+[SYS_close]   "close",
+[SYS_trace]   "trace",
 };
 
 void
@@ -139,6 +175,17 @@ syscall(void)
     // Use num to lookup the system call function for num, call it,
     // and store its return value in p->trapframe->a0
     p->trapframe->a0 = syscalls[num]();
+    // [新增] 系统调用"即将返回"处的追踪打印。
+    // 判断条件：把 trace_mask 右移 num 位后与 1 按位与，
+    // 即检查掩码的第 num 位是否为 1（是否要追踪调用号 num）。
+    // 打印内容：进程 pid、系统调用名（查 syscall_names 表）、返回值
+    // （此时已在 trapframe->a0 中，正是要返回给用户态的值）。
+    // 注意：掩码为 0 的进程（从未调用过 trace 的普通进程）任何位都不匹配，
+    // 一行都不会打印，因此 trace 完全不影响其他进程。
+    if((p->trace_mask >> num) & 1){
+      printf("%d: syscall %s -> %d\n",
+              p->pid, syscall_names[num], p->trapframe->a0);
+    }
   } else {
     printf("%d %s: unknown sys call %d\n",
             p->pid, p->name, num);

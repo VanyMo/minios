@@ -22,6 +22,11 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+// [新增] trace 系统调用的用户态原型：
+// 用户程序（如 user/trace.c）调用 trace(mask) 时，链接器需要在这里找到函数声明，
+// 其实现位于由 user/usys.pl 生成的 user/usys.S 汇编桩中。
+// 参数 mask 是整数掩码，第 n 位为 1 表示追踪系统调用号 n；返回 0 表示成功。
+int trace(int);
 
 // ulib.c
 int stat(const char*, struct stat*);

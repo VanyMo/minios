@@ -36,3 +36,12 @@ entry("getpid");
 entry("sbrk");
 entry("sleep");
 entry("uptime");
+# [新增] 为 trace 系统调用生成用户态汇编桩（见上方 entry 子程序）：
+# 生成的内容等价于：
+#   .global trace
+#   trace:
+#     li a7, SYS_trace   # 把系统调用号 22 放入 a7 寄存器
+#     ecall              # 触发 ecall 指令陷入内核态
+#     ret                # 内核返回后回到用户态调用者
+# 没有这个桩，用户程序调用 trace() 时会链接失败（undefined reference）。
+entry("trace");

@@ -104,4 +104,10 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  // [新增] 系统调用追踪掩码：第 n 位为 1 表示要追踪系统调用号 n。
+  // 放在 "private to the process" 区域：它只被本进程（及 fork 时的父进程）
+  // 在内核态顺序访问，不存在并发竞争，因此不需要持有 p->lock。
+  // 每个进程各自持有一份掩码，天然实现"只影响本进程及其后代、
+  // 不影响其他进程"的要求；fork() 时由父进程复制给子进程。
+  int trace_mask;              // Syscall trace mask (bit n -> trace syscall n)
 };
