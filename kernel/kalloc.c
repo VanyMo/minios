@@ -80,3 +80,28 @@ kalloc(void)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
 }
+
+// [新增] 统计当前空闲物理内存的总字节数，供 sysinfo 系统调用使用。
+//
+// 原理：本文件的内存分配器用一条"空闲链表"管理所有空闲页——
+// kfree() 把一页挂到链表头，kalloc() 从链表头摘下一页。
+// 所以只要从头到尾走一遍这条链表（kmem.freelist），
+// 数出有多少个节点（每个节点 = 一个 4096 字节的空闲页），
+// 节点数 × PGSIZE 就是空闲内存的总字节数。
+//
+// 加锁说明：kmem.lock 保护 freelist 不被多个 CPU 同时修改。
+// 遍历链表期间必须持有该锁，否则别的 CPU 同时 kalloc/kfree
+// 会改变链表结构，导致遍历出错（读到半更新的指针）。
+uint64
+kfreemem(void)
+{
+  struct run *r;     // [新增] 遍历链表用的游标指针
+  uint64 n = 0;      // [新增] 累加器：统计到的空闲字节数
+
+  acquire(&kmem.lock);          // [新增] 拿住分配器自旋锁，独占访问空闲链表
+  for(r = kmem.freelist; r; r = r->next)  // [新增] 从链表头走到链表尾（NULL 结尾）
+    n += PGSIZE;                // [新增] 每遇到一个空闲页，累加一页的字节数（4096）
+  release(&kmem.lock);          // [新增] 释放锁，让其他 CPU 可以继续分配/释放内存
+
+  return n;         // [新增] 返回空闲内存总字节数
+}

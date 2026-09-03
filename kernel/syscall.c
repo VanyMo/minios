@@ -104,6 +104,9 @@ extern uint64 sys_close(void);
 // [新增] sys_trace() 的函数原型声明（实现在 kernel/sysproc.c 中）。
 // syscall() 分发函数通过下面的 syscalls[] 表间接引用它，编译器需要此声明。
 extern uint64 sys_trace(void);
+// [新增] sys_sysinfo() 的函数原型声明（实现在 kernel/sysproc.c 中），
+// 作用同上：收集系统信息（空闲内存/进程数）并拷贝回用户空间。
+extern uint64 sys_sysinfo(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -133,6 +136,9 @@ static uint64 (*syscalls[])(void) = {
 // 指定初始化器（designated initializer）方式保证表下标与系统调用号严格对齐，
 // 未赋值的表项（下标 0）自动为 NULL，syscall() 会将其识别为非法调用号。
 [SYS_trace]   sys_trace,
+// [新增] 把 SYS_sysinfo(23) 映射到 sys_sysinfo 处理函数，
+// 用户态执行 ecall 且 a7=23 时，syscall() 便会调用它。
+[SYS_sysinfo] sys_sysinfo,
 };
 
 // [新增] 系统调用名字符串数组：下标 = 系统调用号，值 = 可打印的名字。
@@ -162,6 +168,7 @@ static char *syscall_names[] = {
 [SYS_mkdir]   "mkdir",
 [SYS_close]   "close",
 [SYS_trace]   "trace",
+[SYS_sysinfo] "sysinfo",
 };
 
 void

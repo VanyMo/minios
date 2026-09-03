@@ -699,3 +699,30 @@ procdump(void)
     printf("\n");
   }
 }
+
+// [新增] 统计"处于活动状态的进程数量"，供 sysinfo 系统调用使用。
+//
+// 原理：xv6 把所有进程放在一张固定大小的表 proc[NPROC]（NPROC=64）里。
+// 每个表项的 state 字段表示该槽位的状态：
+//   UNUSED = 这个槽位是空的，没有进程占用；
+//   其他值（USED/SLEEPING/RUNNABLE/RUNNING/ZOMBIE）= 槽位被真实进程占用。
+// 所以"非 UNUSED 的表项个数"就是当前系统里的进程总数。
+//
+// 加锁说明：state 字段受每个进程自己的 p->lock 保护
+// （allocproc 分配槽位、freeproc 释放槽位时都要改它）。
+// 读取时逐个拿锁再读，保证不会读到正在变更中的中间状态。
+// 每次只持有一个进程的锁、读完立刻释放，不会死锁。
+int
+nproc_active(void)
+{
+  struct proc *p;   // [新增] 遍历进程表用的游标指针
+  int n = 0;        // [新增] 计数器：数出来的活动进程个数
+
+  for(p = proc; p < &proc[NPROC]; p++){  // [新增] 从表头遍历到最后一个表项
+    acquire(&p->lock);                   // [新增] 拿住该进程自己的锁，才能安全读 state
+    if(p->state != UNUSED)               // [新增] 只要状态不是 UNUSED，就说明槽位被占用
+      n++;                               // [新增] 计数加一
+    release(&p->lock);                   // [新增] 立刻放锁，尽量缩短临界区
+  }
+  return n;          // [新增] 返回活动进程总数
+}

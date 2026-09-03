@@ -25,3 +25,7 @@
 // 用户态用法：trace(1 << SYS_fork) 表示追踪 fork；
 // 掩码 2147483647（低 31 位全 1）表示追踪全部系统调用。
 #define SYS_trace  22
+// [新增] 为 sysinfo 分配系统调用号 23（紧接 trace 的 22）。
+// 用户态用法：sysinfo(&info)，内核把 空闲内存字节数(freemem) 和
+// 活动进程数(nproc) 填进用户传入的 struct sysinfo 并拷贝回用户空间。
+#define SYS_sysinfo  23

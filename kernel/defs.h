@@ -63,6 +63,7 @@ void            ramdiskrw(struct buf*);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+uint64          kfreemem(void);   // [新增] 统计空闲物理内存字节数（sysinfo 用）
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -106,6 +107,7 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+int             nproc_active(void); // [新增] 统计状态非 UNUSED 的进程个数（sysinfo 用）
 
 // swtch.S
 void            swtch(struct context*, struct context*);

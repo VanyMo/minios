@@ -45,3 +45,11 @@ entry("uptime");
 #     ret                # 内核返回后回到用户态调用者
 # 没有这个桩，用户程序调用 trace() 时会链接失败（undefined reference）。
 entry("trace");
+# [新增] 为 sysinfo 系统调用生成用户态汇编桩，原理同上：
+#   .global sysinfo
+#   sysinfo:
+#     li a7, SYS_sysinfo # 把系统调用号 23 放入 a7 寄存器
+#     ecall              # 陷入内核态（用户指针已在 a0 里，正好是第 0 个参数）
+#     ret                # 返回用户态，a0 中是内核的返回值（0 成功 / -1 失败）
+# 没有这个桩，用户程序调用 sysinfo() 时会链接失败（undefined reference）。
+entry("sysinfo");
