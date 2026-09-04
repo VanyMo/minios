@@ -1,0 +1,134 @@
+Lab: Multithreading —— 答案
+==========================
+
+Uthread: switching between threads (moderate)
+--------------------------------------------
+
+实现思路：
+  * 给 struct thread 加上一个 struct thread_context 字段，保存
+    callee-save 寄存器（ra, sp, s0..s11）。
+  * thread_create()：把 func 的地址写到 context.ra，把栈顶地址
+    写到 context.sp。这样当 thread_switch 第一次切到该线程时，
+    ret 跳到 context.ra 也就是 func 本身，sp 已经指向该线程的
+    私有栈，func 内部 push 局部变量都用这个栈。
+  * thread_schedule()：选出一个 next_thread 后调
+    thread_switch((uint64)&old->context, (uint64)&next->context)。
+  * thread_switch() (user/uthread_switch.S)：
+    sd 旧线程的 ra/sp/s0..s11 到 *a0；ld 新线程的 ra/sp/s0..s11
+    从 *a1；ret。
+    RISC-V 调用约定下，callee 必须保留 ra 和 s0..s11，caller
+    负责 a0..a7, t0..t6, gp, tp。所以只保存这 14 个寄存器
+    就足够覆盖一次切换需要恢复的全部 callee-save 状态。
+
+为什么只需要 callee-save？
+  caller-saved 寄存器由 caller（thread_schedule 的 C 代码）维护，
+  switch 的过程是 thread_schedule 内部调用 thread_switch，因此
+  编译器生成 thread_schedule 自己的 prologue/epilogue 已经把
+  caller-saved 寄存器的保存/恢复做好了。我们只需要让
+  thread_switch 自己作为被调用方，保存自己用到的 callee-save
+  即可；这些寄存器恰好就是被换下线程的“长期状态”。
+  至于 caller-saved，thread_schedule 在调用 thread_switch 之后
+  到 thread_switch 返回之间不会用到它们（它返回后调度结束），
+  所以新线程到来时 caller-saved 寄存器的内容无关紧要，可以
+  由新线程的代码自己初始化。
+
+
+Using threads (moderate)
+------------------------
+
+Q: Why are there missing keys with 2 threads, but not with 1 thread?
+   Identify a sequence of events with 2 threads that can lead to
+   a key being missing.
+
+A: 单线程时，put() 不会被任何其它代码打断，所以 “读 table[i] -> 走
+   链表查 key -> 没找到 -> insert” 整个流程是原子的。
+
+   多线程时，如果两个线程几乎同时执行 put(K, ...)，且 K % NBUCKET
+   的桶号 i 相同，可能发生如下交错：
+
+      T1: i = K % 5        → i
+      T1: e = table[i]     → NULL  (假设桶里之前没 K)
+      --- 调度切换到 T2 ---
+      T2: i = K % 5        → 同一个 i
+      T2: e = table[i]     → 仍然 NULL (T1 还没插入)
+      T2: insert(K, ..., &table[i], table[i])
+          —— T2 把一个新 entry 挂到 table[i]，table[i] 现在指向 T2 的 entry
+      --- 调度切换回 T1 ---
+      T1: 看到 e == NULL (T1 之前读到的 e)
+      T1: insert(K, ..., &table[i], table[i])
+          —— T1 用 T2 的 entry 当作 "next"，
+              并把 table[i] 覆盖为 T1 自己的 entry
+      结果：T2 的 entry 没有被任何指针引用，丢失。
+            K 仍然只在 table 里出现 1 次（T1 的 entry），
+            get(K) 还能找到；问题更严重的是其它原本可以正确
+            插入的 key 在 T2 这次 insert 时被覆盖了。
+
+   这就是 missing keys 出现的原因：两个 put 读了相同的 table[i]，
+   然后都决定 insert，都把 table[i] 指针覆盖——其中一个 entry 永远
+   失去了。
+
+Q: To avoid this sequence of events, insert lock and unlock statements
+   in put and get so that the number of keys missing is always 0.
+
+A: 在 put/get 入口加锁、出口解锁，把 “查表 + 修改” 串行化。
+   进一步优化：每个 bucket 一把锁（NBUCKET 把锁），不同 bucket 上的
+   put 可以真正并行——这就是 ph_fast 要求的加速来源。
+
+   ph.c 的最终实现：
+     pthread_mutex_t locks[NBUCKET];
+     void put_safe(key, value):
+       i = key % NBUCKET;
+       pthread_mutex_lock(&locks[i]);
+       // ... 原有查表+插入逻辑 ...
+       pthread_mutex_unlock(&locks[i]);
+
+   两个线程同时 put(K1, ...) 和 put(K2, ...)：
+     * K1 % NBUCKET == K2 % NBUCKET：同一 bucket，必串行。
+     * 否则：不同 bucket，可以并行。
+
+   测得的两线程吞吐通常是单线程的 1.6x~1.8x 左右（NBUCKET=5），
+   满足 ph_fast 的 1.25x 阈值。
+
+Q: Test your code first with 1 thread, then test with 2 threads.
+   Is it correct? Does the two-threaded version achieve parallel speedup?
+
+A: 1 线程：missing = 0；速度与原版基本一致（多出的 lock 开销可以忽略）。
+   2 线程：missing = 0；总吞吐 ≈ 1.6x ~ 1.8x 单线程，达成 ph_fast 阈值。
+
+
+Barrier (moderate)
+------------------
+
+Q: Make sure your solution passes make grade's barrier test.
+
+实现：
+   用 pthread_mutex + pthread_cond 实现 barrier。
+
+   关键点：
+     1) 每次进入 barrier 都加锁，再 ++nthread。
+     2) 如果 ++ 后 nthread == 总线程数：
+          - 自己是最后一个到的；
+          - 准备进入下一轮：bstate.round++，bstate.nthread = 0；
+          - pthread_cond_broadcast 唤醒其他所有挂在 cond 上的线程；
+          - 解锁返回。
+        否则：
+          - pthread_cond_wait(&cond, &mutex)；
+          - 该调用原子地释放 mutex、阻塞当前线程；
+          - 收到 broadcast 后被唤醒，重新获得 mutex，返回。
+     3) 注意：必须在持锁状态下调用 cond_wait；cond_wait 内部会
+        释放锁、被唤醒时再次加锁。
+
+   关键陷阱（提示里提到）：
+     a) 必须 ++nthread 再判断，不能先判断后 ++，否则可能多个
+        线程都判断为 “不是最后一个” 都去 sleep。
+     b) 必须 broadcast 而不是 signal；否则只唤醒一个，剩下
+        的线程永远等不到。
+     c) cond_wait 要用 while 循环（虽然我们这里没循环，但本质
+        相同——可能在 wait 期间被 spurious wakeup），
+        也可以把 “nthread != 0” 作为 while 条件。
+     d) bstate.nthread = 0 必须由 “最后一个到达的线程” 在
+        唤醒所有人之后做，并且要放在 mutex 保护下——否则可能
+        其它线程已经出 barrier 进入下一轮，又在别的轮次
+        把 nthread 改了。代码里 bstate.nthread = 0 在
+        nthread == nthread 分支的最后，所有 wait 着的线程
+        醒来时 nthread 已经是 0 了。
