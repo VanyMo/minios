@@ -344,6 +344,10 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PTE_X (1L << 3)
 #define PTE_U (1L << 4) // user can access
 
+// 下面是 RISC-V Sv39 页表项中尚未在 xv6 中使用的标志位，本实验用到 PTE_A。
+#define PTE_A (1L << 6) // accessed：CPU 访问过该页（由硬件置位）
+#define PTE_D (1L << 7) // dirty：CPU 写过该页（可选扩展用）
+
 // shift a physical address to the right place for a PTE.
 #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)
 

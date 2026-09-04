@@ -449,3 +449,56 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+// ----------------------------------------------------------------------
+// 本实验新增：vmprint —— 递归打印一个页表的内容
+// ----------------------------------------------------------------------
+//
+// 每一层页表页包含 512 个 PTE。我们用 depth 表示当前递归深度：
+//   depth == 0：根页表（L2），对应整张页表
+//   depth == 1：L1 中间页表
+//   depth == 2：L0 叶子页表
+//
+// 打印格式（与实验要求一致）：
+//   page table 0x....   (vmprint 的第一行)
+//   ..0x0: pte 0x.... pa 0x....
+//   .. ..0x0: pte 0x.... pa 0x....
+//   .. .. ..0x0: pte 0x.... pa 0x....
+//
+// 缩进用每层两个空格 + 两个点表示，深一层前缀多一组 " .."。
+// 不打印 PTE_V 为 0 的 PTE。
+static void
+vmprint_walk(pagetable_t pagetable, int depth)
+{
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) == 0)
+      continue;
+
+    // 计算该 PTE 覆盖的起始虚拟地址。
+    // depth=0: 根页表(L2) -- 一项对应 1GB，VA 的 bit30..38 是 i
+    // depth=1: L1 中间页表 -- 一项对应 2MB，VA 的 bit21..29 是 i
+    // depth=2: L0 叶子页表 -- 一项对应 4KB，VA 的 bit12..20 是 i
+    int level = 2 - depth; // 根 depth=0 -> level=2；叶子 depth=2 -> level=0
+    uint64 va = (uint64)i << PXSHIFT(level);
+
+    // 打印缩进：每一层前缀 " .."，深一层多一组。
+    for(int j = 0; j < depth + 1; j++)
+      printf(" ..");
+    // 注意：示例输出里 VA / pte / pa 都使用 0x + 16 位十六进制格式（带前导 0），
+    // 例如 0x0000000087f1e000，因此这里用 0x%016lx 强制输出 64 位宽度。
+    printf("0x%016lx: pte 0x%016lx pa 0x%016lx\n", va, (uint64)pte, PTE2PA(pte));
+
+    // 若该 PTE 没有 R/W/X 任意一位，则它指向下一级页表，需要递归。
+    if((pte & (PTE_R | PTE_W | PTE_X)) == 0)
+      vmprint_walk((pagetable_t)PTE2PA(pte), depth + 1);
+  }
+}
+
+// vmprint 入口：先打印 "page table 0x...."，再递归打印整张页表。
+void
+vmprint(pagetable_t pagetable)
+{
+  printf("page table 0x%016lx\n", (uint64)pagetable);
+  vmprint_walk(pagetable, 0);
+}
