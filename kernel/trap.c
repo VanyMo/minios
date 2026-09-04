@@ -67,6 +67,45 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 15){
+    // =============================================================
+    // COW 实验新增：处理 Store/AMO page fault（scause == 15）
+    // =============================================================
+    //
+    // RISC-V 里 scause == 15 表示 "Store/AMO page fault"，
+    // 即用户进程尝试写一个 PTE_W == 0 的页。
+    // 在 COW 设计下有两种情况：
+    //
+    //   (a) 原本就只读的页（如 .text 段）—— 视为程序 bug，kill 进程。
+    //   (b) COW 共享页（PTE_W == 0 && PTE_RSW == 1）—— fork 之后
+    //       父/子双方都还指向同一物理页。这次写入是“真的要分家”的时候，
+    //       所以要 cowcopy() 分配新物理页，复制旧页内容，
+    //       把本进程 PTE 改成可写，进程就可以继续写。
+    //
+    // r_stval() 返回触发 fault 的虚拟地址。
+    uint64 va = r_stval();
+
+    // 找到 va 对应的 PTE
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if(pte == 0){
+      // 缺页：walk 都找不到这种 PTE，说明这地址根本没映射
+      setkilled(p);
+    } else if(*pte & PTE_RSW){
+      // 是 COW 共享页：分配新页、复制
+      if(cowcopy(p->pagetable, pte) == 0){
+        // 成功：保持原 epc，让进程再执行一次出错的指令，
+        // 这次写到自己独占的新物理页上就 OK 了。
+      } else {
+        // 物理内存不足，没法分配新页
+        setkilled(p);
+      }
+    } else if(*pte & PTE_V){
+      // 真的只读页（PTE_W==0 且没有 RSW 标记），写它就是 bug
+      setkilled(p);
+    } else {
+      // PTE 无效：缺页
+      setkilled(p);
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

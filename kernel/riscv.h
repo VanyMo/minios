@@ -344,11 +344,34 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PTE_X (1L << 3)
 #define PTE_U (1L << 4) // user can access
 
+// ======================================================================
+// COW 实验新增：PTE_RSW 标志位
+// ======================================================================
+// RISC-V PTE 里的 bit 8 / bit 9 是 “RSW (Reserved for Software)”，
+// 规范明确说硬件不会解释它们，由操作系统软件自由使用。
+// 我们用 bit 8 (PTE_RSW) 来表示 “这是一个 COW 共享页”：
+//
+//   fork 时，原本可写 (PTE_W==1) 的用户页会同时被：
+//     1. 父进程 PTE 改写为  (flags & ~PTE_W) | PTE_RSW
+//     2. 子进程 PTE 改写为  同样
+//   因此两个进程都把这一物理页看作 “只读 + COW”。
+//   当任何一边真正写时，RISC-V 触发 scause==15 (Store/AMO page fault)，
+//   usertrap 在 usertrap() 里识别 PTE_RSW，调用 cowcopy
+//   分配新页并让本进程拥有自己的可写副本。
+//
+// 原本就只读的页（如 .text）不会设置 PTE_RSW——
+// 它们 PTE_W 始终是 0，写它们就是程序 bug，usertrap 会 kill 进程。
+#define PTE_RSW (1L << 8)
+
 // shift a physical address to the right place for a PTE.
 #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)
 
 #define PTE2PA(pte) (((pte) >> 10) << 12)
 
+// 注意：PTE_FLAGS 用来从一个 PTE 中取出标志位。原来的 (pte) & 0x3FF
+// 只取低 10 位。我们用了 bit 8 (PTE_RSW) 来标记 COW，
+// 所以把掩码扩展到 0x3FF 仍然能取到（bit 8 在低 10 位内），
+// 因此 PTE_FLAGS 不需要改。
 #define PTE_FLAGS(pte) ((pte) & 0x3FF)
 
 // extract the three 9-bit page table indices from a virtual address.

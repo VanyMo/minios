@@ -1,0 +1,98 @@
+Lab: Copy-on-Write Fork —— 答案
+================================
+
+The problem
+-----------
+
+xv6 的 fork() 在子进程中完整复制父进程的用户态内存：
+对每个用户页都 kalloc 一个新物理页、再 memmove 拷贝内容。
+当父进程占用很多内存时，这一复制很慢；而且如果子进程紧跟着
+exec()，刚复制的内容会被立刻丢弃，造成浪费。
+
+The solution: copy-on-write
+----------------------------
+
+COW fork 只给子进程建立一份页表，把父进程的所有可写用户页 PTE
+复制到子进程中，但**两个 PTE 都指向同一物理页**，并且都把
+PTE_W 清零（标记为只读），同时用 PTE_RSW (bit 8) 标记这是一个
+COW 共享页。
+
+之后任何一边尝试写这个 PTE，RISC-V 都会触发 scause == 15
+（Store/AMO page fault）陷入内核。usertrap 看到：
+  - PTE 有效 (PTE_V)
+  - 不可写 (PTE_W == 0)
+  - PTE_RSW == 1
+就说明这是个 COW 页面，于是 kalloc 一块新物理页，把旧页内容
+memmove 过去，把 PTE 指向新页、恢复 PTE_W、清掉 PTE_RSW，
+进程再恢复执行就拥有了自己独占的可写副本。
+
+因为一个物理页可能被父子两个进程共享，kfree 不能简单把它放回
+freelist。所以本实验给每一页加了一个引用计数：
+  - kalloc 时初始化为 1
+  - uvmcopy 让子进程也共享该页时 +1
+  - kfree 时 -1；只有减到 0 才真正归还到 freelist
+
+Implementation summary
+----------------------
+
+涉及修改的文件：
+
+kernel/riscv.h
+  - 新增 PTE_RSW (bit 8) 宏定义，用 RISC-V PTE 的 “reserved for
+    software” 位来标记 COW 页。
+  - PTE_FLAGS 仍然用 0x3FF 作为掩码——因为 PTE_RSW 在低 10 位以内，
+    所以现有的 PTE_FLAGS 调用者拿到 PTE 之后检查 PTE_RSW 仍然有效。
+
+kernel/kalloc.c
+  - 增加一个 pa_refcnt[] 数组（大小 = (PHYSTOP - KERNBASE)/PGSIZE），
+    下标 = (pa - KERNBASE) / PGSIZE。
+  - 初始化为 0（BSS 自动）。
+  - kalloc() 把 pa_refcnt[idx] 设为 1。
+  - kfree() 把 pa_refcnt[idx] 减 1；若结果 >0 直接 return；
+    否则才把页放回 freelist。
+  - 提供 kref(void *pa) 和 kref_inc(void *pa) 给 vm.c 使用。
+
+kernel/vm.c
+  - uvmcopy() 改为“共享父进程的物理页”：
+      pte = walk(old, i, 0);
+      pa  = PTE2PA(*pte);
+      flags = PTE_FLAGS(*pte);
+      if(flags & PTE_W) flags = (flags & ~PTE_W) | PTE_RSW;
+      mappages(new, i, PGSIZE, pa, flags);
+      kref_inc((void *)pa);
+    失败路径直接 uvmunmap 回滚。
+  - copyout() 在遇到 (!PTE_W && PTE_RSW) 时，按 cowcopy 的方式
+    分配新页、复制内容、重写 PTE 再写入。
+  - 新增 cowcopy(pagetable, pte)：把 pte 指向的旧物理页换成一个
+    新物理页（kalloc + memmove + kfree 旧页），并把 PTE 改成
+    “PTE_W=1, PTE_RSW=0” 的常规映射。
+
+kernel/trap.c (usertrap)
+  - 在原来的 devintr 分支之后加一个
+      else if(r_scause() == 15) { ... }
+    走 COW 流程：
+      pte = walk(pagetable, stval, 0);
+      if (pte && (*pte & PTE_RSW)) {
+        if (cowcopy(...) == 0) /* 恢复执行 */;
+        else setkilled(p);     // 没内存了
+      } else setkilled(p);      // 本来就只读，不是 COW
+
+kernel/defs.h
+  - 声明 kref / kref_inc / cowcopy。
+
+Makefile
+  - cow 分支里 UPROGS 已经包含 _cowtest，无需修改。
+
+How COW fork makes life better
+------------------------------
+
+  - fork() 不再需要分配/拷贝任何用户页。
+  - 物理页只在真正发生写入时（如果发生）才被复制。
+  - 父子任意一边退出 / exec / 改写时，未被使用的那一份
+    不会立刻被“破坏”——只有当两个 PTE 都不再需要时才回收到 freelist。
+  - cowtest 的 simpletest 因此能在只剩一半物理内存时 fork，
+    而 usertests -q 中各种内存压力场景也能通过。
+
+参考的真实内核实现：
+  - Patching until the COWs come home (LWN)
+  - Linux 内核的 copy_{user,page}_* 实现
