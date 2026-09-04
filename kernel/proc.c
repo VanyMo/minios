@@ -146,6 +146,16 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // ===== 初始化 alarm 字段（traps 实验） =====
+  // 这五个字段必须在 allocproc() 中清零，
+  // 否则使用过该 proc 槽位的老进程残留值会污染新进程。
+  // memset(..., 0, sizeof(...)) 是把 alarm_tf 的整个 280 字节结构体清零。
+  p->alarm_interval = 0;       // 0 = 禁用 alarm
+  p->alarm_handler  = 0;       // NULL
+  p->alarm_ticks    = 0;       // 计数器从 0 开始
+  p->alarm_on       = 0;       // 不在 handler 中
+  memset(&p->alarm_tf, 0, sizeof(p->alarm_tf));
+
   return p;
 }
 

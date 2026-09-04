@@ -59,6 +59,50 @@ printptr(uint64 x)
     consputc(digits[x >> (sizeof(uint64) * 8 - 4)]);
 }
 
+// ----------------------------------------------------------------------
+// backtrace()：从当前栈帧开始，沿着 s0 帧指针链向上遍历，
+//             把每个栈帧里的“返回地址”打印出来。
+//
+// 栈帧布局（参考实验提示）：
+//   s0 指向的位置 + 8 = 当前栈帧起始（即“父帧指针”位置）
+//   [s0 - 8]  = saved ra  （要打印的返回地址）
+//   [s0 - 16] = saved s0  （调用者的 s0）
+//
+// 终止条件：走到当前 CPU 的栈底部。本实验里每个进程的内核栈都恰好
+//          是一个 4KB 的页（PGROUNDDOWN(fp) 能算出所属页），
+//          因此用 PGROUNDDOWN(fp) 比较，越过页边界就停止。
+//
+// C 语法说明：
+//   uint64 —— RISC-V 上的 64 位无符号整数类型（8 字节）
+//   *(uint64 *)fp  —— 先把 fp 强制转换为 (uint64 *) 指针，再解引用，
+//                    等价于读取 fp 指向的 8 字节内存作为一个 uint64 值。
+//   PGROUNDDOWN(fp) —— 宏定义在 riscv.h 中，把 fp 向下取整到页边界
+//                    （即把低 12 位清零）。
+//   r_fp()  —— 上一节里实现的内联函数，读取当前 s0 寄存器的值。
+// ----------------------------------------------------------------------
+void
+backtrace(void)
+{
+  uint64 fp = r_fp();          // 当前栈帧的 s0
+  uint64 top = PGROUNDDOWN(fp);  // 当前栈所在的页起始地址
+
+  printf("backtrace:\n");
+  for(;;){
+    // fp - 8 位置保存的是“调用本函数的那条 call/jal 指令的下一条”
+    // 也就是返回后 CPU 应该继续执行的指令地址。
+    uint64 saved_ra = *(uint64 *)(fp - 8);
+    printf("%p\n", saved_ra);
+    // fp - 16 位置保存的是调用者的 s0 帧指针，沿着它往回走就是
+    // “调用本函数的函数的栈帧”。
+    fp = *(uint64 *)(fp - 16);
+    // 已经走出当前内核栈所在的页，说明到了栈底，停止。
+    if(PGROUNDDOWN(fp) != top)
+      break;
+    if(fp == 0)  // 防御性
+      break;
+  }
+}
+
 // Print to the console. only understands %d, %x, %p, %s.
 void
 printf(char *fmt, ...)
@@ -122,6 +166,8 @@ panic(char *s)
   printf("panic: ");
   printf(s);
   printf("\n");
+  // 在内核崩溃时也打印栈回溯，方便定位
+  backtrace();
   panicked = 1; // freeze uart output from other CPUs
   for(;;)
     ;

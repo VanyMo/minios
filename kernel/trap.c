@@ -46,10 +46,10 @@ usertrap(void)
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
-  
+
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
+
   if(r_scause() == 8){
     // system call
 
@@ -75,6 +75,33 @@ usertrap(void)
 
   if(killed(p))
     exit(-1);
+
+  // ====== alarm 处理：仅在时钟中断时检查并触发 ======
+  // 触发条件（必须全部满足）：
+  //   1) which_dev == 2 —— 本次 usertrap 是由 timer interrupt 引起的
+  //                         （devintr() 返回 2 时表示“机器模式时钟中断被转发”）
+  //   2) p->alarm_interval > 0 —— 用户调用过 sigalarm(>0, ...) 注册
+  //   3) p->alarm_handler != 0 —— handler 指针有效
+  //   4) !p->alarm_on —— 当前不在 handler 中执行（避免重入，test2 会检查）
+  if(which_dev == 2 && p->alarm_interval > 0 && p->alarm_handler != 0 && !p->alarm_on){
+    p->alarm_ticks++;          // 累计自上次触发以来经过的 tick 数
+    if(p->alarm_ticks >= p->alarm_interval){
+      // 触发 alarm：
+      //   - 把整个 trapframe 复制到 alarm_tf。
+      //     trapframe 此时已经保存了被中断那一刻全部的用户寄存器 + epc，
+      //     包括 a0~a7、s0~s11、ra、sp、t0~t6 等等。
+      //     epc 当前是被中断的那条用户指令的地址（注意：对于系统调用路径
+      //     会做 += 4，但 alarm 走的是 timer 中断路径，没有 += 4），
+      //     所以 sigreturn 之后能从“被中断的那条指令”继续执行。
+      //   - alarm_on = 1 —— 标记正在 handler 中，下一次 tick 不会再触发
+      //   - alarm_ticks 清零，重新计数下一个周期
+      //   - 把 epc 改成 handler，使 usertrapret 里的 sret 跳到 handler
+      p->alarm_tf = *p->trapframe;        // 复制整个 trapframe (sizeof = 280 字节)
+      p->alarm_on = 1;
+      p->alarm_ticks = 0;
+      p->trapframe->epc = (uint64)p->alarm_handler; // 下次 sret 跳到 handler
+    }
+  }
 
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)

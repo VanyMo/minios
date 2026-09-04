@@ -96,12 +96,22 @@ struct proc {
   struct proc *parent;         // Parent process
 
   // these are private to the process, so p->lock need not be held.
-  uint64 kstack;               // Virtual address of kernel stack
-  uint64 sz;                   // Size of process memory (bytes)
-  pagetable_t pagetable;       // User page table
-  struct trapframe *trapframe; // data page for trampoline.S
-  struct context context;      // swtch() here to run process
-  struct file *ofile[NOFILE];  // Open files
-  struct inode *cwd;           // Current directory
-  char name[16];               // Process name (debugging)
+  uint64 kstack;               // Virtual address of kernel stack（内核栈的虚拟地址）
+  uint64 sz;                   // Size of process memory (bytes)（进程用户态内存的字节数）
+  pagetable_t pagetable;       // User page table（用户页表根页的物理地址）
+  struct trapframe *trapframe; // data page for trampoline.S（保存/恢复用户寄存器的陷阱帧）
+  struct context context;      // swtch() here to run process（上下文切换时保存的寄存器）
+  struct file *ofile[NOFILE];  // Open files（打开的文件描述符表）
+  struct inode *cwd;           // Current directory（当前工作目录）
+  char name[16];               // Process name (debugging)（进程名，调试用）
+
+  // ====== alarm 相关字段 ======
+  // 下面 5 个字段是 traps 实验新增的，
+  // 用于实现“周期性触发用户态处理函数”的功能（sigalarm / sigreturn）。
+  int   alarm_interval;        // 周期（每多少个 tick 触发一次 handler）；0 表示未启用
+  void (*alarm_handler)();     // 用户态的“信号”处理函数指针
+  int   alarm_ticks;           // 自上次触发以来已经累积的 tick 数
+  int   alarm_on;              // 是否正处于 handler 执行中（防止 tick 中断再次进入 handler）
+  struct trapframe alarm_tf;   // 进入 handler 之前保存的 trapframe，
+                                // sigreturn 时用它恢复现场
 };

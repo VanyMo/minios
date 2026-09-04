@@ -1,0 +1,173 @@
+Lab: traps - 答案
+==================
+
+RISC-V assembly (easy)
+----------------------
+
+1. Which registers contain arguments to functions? For example, which register holds 13 in main's call to printf?
+
+   RISC-V 的函数调用约定（calling convention）使用 a0~a7 这 8 个寄存器传递
+   整数 / 指针参数。多于 8 个的参数则通过栈传递。返回值放在 a0 中。
+
+   在 main 调用 printf("%d %d\n", f(8)+1, 13) 中：
+     - a0 = 指向 "%d %d\n" 字符串的指针（第一个参数）
+     - a1 = f(8)+1 = 12（第二个参数，由 `li a1, 12` 装入）
+     - a2 = 13（第三个参数，由 `li a2, 13` 装入）
+
+   所以，13 保存在 a2 寄存器中。
+
+2. Where is the call to function f in the assembly code for main? Where is the call to g? (Hint: the compiler may inline functions.)
+
+   在 main 的汇编代码中：
+     - 没有显式的对 f() 的 `call` / `jalr` 指令，因为 f() 被编译器完全内联了。
+       在 main 函数体里只看到 `li a1, 12`（即 f(8)+1 = 12）。
+     - 同样没有对 g() 的调用，因为 g() 也被 f() 内联。
+       在 f() 里 `addiw a0,a0,3` 一条指令实现了 g(x) = x+3。
+
+   两个函数都被优化掉了——编译器觉得它们的实现足够简单，直接就地展开
+   比发出真正的 call 更省时间和代码体积。
+
+3. At what address is the function printf located?
+
+   在 main 中调用 printf 的方式是：
+     30:  00000097   auipc  ra, 0x0
+     34:  610080e7   jalr   1552(ra)
+
+   `auipc ra, 0x0` 把当前 PC（0x30）的高 20 位 + 偏移 0 装入 ra；
+   即 ra = 0x30。再加上下条指令 jalr 的立即数 1552 = 0x610，
+   目标地址 = 0x30 + 0x610 = 0x640。
+
+   在反汇编的输出中也可以直接看到 <printf> 的入口地址是 0x640。
+
+4. What value is in the register ra just after the jalr to printf in main?
+
+   jalr 跳转指令会把“返回地址”（即 jalr 指令自己的地址 + 4）装入 ra，
+   之后才跳转到目标。所以 jalr 执行完后，ra = 0x34 + 4 = 0x38。
+   也就是 main 中 `li a0, 0` 那条指令的地址——printf 返回后会从这里继续。
+
+5. Run the following code.
+       unsigned int i = 0x00646c72;
+       printf("H%x Wo%s", 57616, &i);
+   What is the output?
+
+   把 i = 0x00646c72 视为 4 字节（小端）：
+     字节 0 (低地址): 0x72 = 'r'
+     字节 1         : 0x6c = 'l'
+     字节 2         : 0x64 = 'd'
+     字节 3 (高地址): 0x00 = '\0'
+   所以从 &i 开始的字符串是 "rld\0"——但 %s 只读到 '\0' 为止，
+   即 "rld"（注意是反过来的 "rld"，不是 "dlr"）。
+
+   57616 用 %x 输出是 e110（57616 = 0xe110）。
+
+   因此输出是:  He110 World
+
+   (其中的 "He110 Wo" + 字符串 "rld")
+
+6. If the RISC-V were instead big-endian what would you set i to in order to yield the same output? Would you need to change 57616 to a different value?
+
+   大端机器会把 i 解释为：
+     字节 0 (低地址): 0x72 -> 'r'
+     字节 1         : 0x6c -> 'l'
+     字节 2         : 0x64 -> 'd'
+     字节 3         : 0x00 -> '\0'
+   与小端相反——要让 &i 仍然得到 "rld" 序列，
+   必须让字节 0 = 'r' (0x72)，字节 1 = 'l' (0x6c)，字节 2 = 'd' (0x64)。
+   即 i = 0x726c6400。
+
+   57616 的值不需要改——%x 是按整数本身打印的，不受字节序影响。
+
+7. In the following code, what is going to be printed after 'y='? Why does this happen?
+       printf("x=%d y=%d", 3);
+
+   答案不是某个具体值。printf 按照 ABI 假设 a1 是第二个 %d 的参数，
+   但这里根本没有传第二个参数，所以 a1 寄存器里是上一次调用 / 上下文
+   留下的“垃圾”值。具体会打印多少要看当时 a1 里残留了什么。
+
+   关键点：
+   - C 语言调用约定不要求调用者把所有可能用到的寄存器都初始化；
+   - 编译器在 x=%d 后看到 y=%d 仍会去读 a1 这个参数寄存器；
+   - a1 在 printf 之前没被显式设置过，所以 y= 后面会输出一个不确定的整数。
+
+
+Backtrace (moderate)
+--------------------
+
+  (实现细节见 kernel/printf.c 中的 backtrace() 注释)
+
+  backtrace() 通过 r_fp() 读出 s0 (frame pointer)，沿 s0 链向上遍历：
+    -  [s0 - 8]  保存的 ra (返回地址)         —— 这一帧调用本函数时的地址
+    -  [s0 - 16] 保存的 s0 (调用者的帧指针)
+  终止条件：用 PGROUNDDOWN(fp) 判断是否已经走出当前 CPU 内核栈所在的页
+  （每个内核栈恰好 4 KB，对齐到一个页）。
+
+  调用点：
+    - kernel/sysproc.c 的 sys_sleep() 中，在 acquire(&tickslock) 之后
+      立即调用 backtrace()，从而 bttest 触发时能看到调用栈。
+    - kernel/printf.c 的 panic() 中，结尾调用 backtrace()，让内核
+      崩溃时也能打印栈回溯，方便定位。
+
+  典型输出（地址会随编译不同）：
+    backtrace:
+    0x0000000080002cda
+    0x0000000080002bb6
+    0x0000000080002898
+
+  配合 addr2line -e kernel/kernel 即可得到形如
+    kernel/sysproc.c:74
+    kernel/syscall.c:224
+    kernel/trap.c:85
+  这样的行号/函数名信息。
+
+
+Alarm (hard)
+------------
+
+  (实现细节见 kernel/proc.h, kernel/proc.c, kernel/sysproc.c,
+   kernel/trap.c, user/usys.pl, user/user.h, Makefile 的注释)
+
+  新增两个系统调用：
+    - int sigalarm(int ticks, void (*handler)())
+        注册一个周期处理函数。每消耗 ticks 个时钟中断后，
+        内核会在 usertrap() 中把进程 PC 切换到 handler。
+        传 (0, 0) 表示取消。
+    - int sigreturn(void)
+        从用户态 handler 返回。
+        真正的实现是把进入 handler 之前保存的 trapframe 拷回去，
+        并清掉 alarm_on 标志，从而恢复成“普通”上下文。
+
+  关键点：
+    1. struct proc 中加入 alarm_interval / alarm_handler / alarm_ticks
+       / alarm_on / alarm_tf (一个完整的 trapframe 副本) 这五个字段。
+    2. allocproc() 中把这五个字段初始化为 0。
+    3. usertrap() 中，当 r_scause 既不是 8 (syscall) 也不是意外的
+       异常，并且 which_dev == 2 (timer)，并且当前没在 handler 中
+       (alarm_on == 0) 时，让 alarm_ticks 累加；累计到 alarm_interval
+       就把整个 trapframe 复制到 alarm_tf，把 epc 改成 handler，
+       并设置 alarm_on = 1。下一次 sret 就跳到 handler。
+    4. sys_sigreturn() 把 alarm_tf 拷回 trapframe，
+       并把 alarm_on 复位，相当于“解开 handler，回到被中断处”。
+    5. test2 要求 handler 不被重入，alarm_on 标志保证了这一点。
+    6. test3 要求从 sigreturn 返回后 a0 不被改写，
+       这要求 sigreturn 自己不要把 a0 当作“系统调用返回值”
+       之外的用途去修改——而 xv6 本来就只是把 sys_sigreturn 的
+       返回值（0）放到 a0。*p->trapframe = p->alarm_tf 会恢复
+       进入 handler 之前用户 a0 的值（包含 sys_sigreturn 调用时
+       刚刚写入的 0 之外的值），所以测试可以观察到 a0 仍然是
+       用户程序原本设置的 0xac。
+
+  期望 alarmtest 的输出形如：
+    test0 start
+    ........alarm!
+    test0 passed
+    test1 start
+    ...alarm!
+    ..alarm!
+    ...alarm!
+    ...
+    test1 passed
+    test2 start
+    ...............alarm!
+    test2 passed
+    test3 start
+    test3 passed

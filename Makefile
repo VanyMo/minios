@@ -236,6 +236,15 @@ UPROGS += \
 	$U/_pgtbltest
 endif
 
+ifeq ($(LAB),traps)
+# 在 traps 实验分支下，额外把 alarmtest 和 bttest 编进用户程序镜像。
+#   - _alarmtest 用来测试 sigalarm/sigreturn
+#   - _bttest    用来测试 backtrace（bttest 调用 sleep(1) 触发 backtrace 输出）
+UPROGS += \
+	$U/_alarmtest\
+	$U/_bttest
+endif
+
 ifeq ($(LAB),lock)
 UPROGS += \
 	$U/_kalloctest\
