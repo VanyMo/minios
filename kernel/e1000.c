@@ -92,29 +92,126 @@ e1000_init(uint32 *xregs)
   regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
 }
 
+// ---------------------------------------------------------------------
+// e1000_transmit(m)
+//   把一个 mbuf 放进 TX 描述符环，让 E1000 把它发到网络上。
+//   m->head 指向 mbuf 数据的起始地址（以太网帧）；
+//   m->len  是这个帧的字节数。
+//
+// 整体流程（参考 E1000 手册 3.3 + 3.4）：
+//   1) 读 E1000_TDT 寄存器：E1000 当前期望下一个要发送的描述符下标；
+//   2) 检查 tx_ring[idx] 的 status 是否带 E1000_TXD_STAT_DD。
+//      DD = "Descriptor Done"：硬件已经把这一格的数据发出去了。
+//      如果 DD 还没置位，说明 E1000 还没用完这一格——返回 -1。
+//   3) 如果这一格之前放过一个 mbuf（tx_mbufs[idx] != 0），
+//      说明已经发完了，可以把它释放（mbuffree）。
+//   4) 填 tx_ring[idx]：addr = m->head，length = m->len，
+//      cmd = EOP | RS  —— EOP 表示“end of packet”，RS 表示
+//      “report status”，让硬件发完这一格后把 DD 置位。
+//   5) 把 m 存到 tx_mbufs[idx]，等待以后回收。
+//   6) 更新 E1000_TDT 为 (idx+1) % TX_RING_SIZE，
+//      通知 E1000 有新包要发。
+//   7) 释放锁，返回 0。
+//
+// 加锁：防止多进程同时 transmit，以及和 e1000_recv（也在同一线程上，
+// 但中断/内核线程也可能调用）共享对 ring 的访问。
+// ---------------------------------------------------------------------
 int
 e1000_transmit(struct mbuf *m)
 {
-  //
-  // Your code here.
-  //
-  // the mbuf contains an ethernet frame; program it into
-  // the TX descriptor ring so that the e1000 sends it. Stash
-  // a pointer so that it can be freed after sending.
-  //
-  
+  // 抢锁：保护对 tx_ring / tx_mbufs / E1000_TDT 的访问
+  acquire(&e1000_lock);
+
+  // 1) 读 E1000_TDT：硬件期望下一个描述符的下标
+  uint32 idx = regs[E1000_TDT];
+
+  // 2) 环形溢出检查：如果这一格的 DD 位没置位，
+  //    说明硬件还没消费完这一格——返回 -1。
+  if((tx_ring[idx].status & E1000_TXD_STAT_DD) == 0){
+    release(&e1000_lock);
+    return -1;
+  }
+
+  // 3) 释放上一次使用这一格的 mbuf（如果存在的话）
+  if(tx_mbufs[idx]){
+    mbuffree(tx_mbufs[idx]);
+  }
+
+  // 4) 填描述符：
+  //    addr  : mbuf 数据起始地址（DMA 源）
+  //    length: 帧长
+  //    cmd   : EOP (last segment of packet) + RS (hardware reports status)
+  tx_ring[idx].addr   = (uint64)m->head;
+  tx_ring[idx].length = (uint16)m->len;
+  tx_ring[idx].cmd    = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  // status 由硬件写；清零保证下次写之前是干净状态
+  tx_ring[idx].status = 0;
+
+  // 5) 记录 mbuf 指针，等发完后再 free
+  tx_mbufs[idx] = m;
+
+  // 6) 通知 E1000 推进 tail 指针
+  regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
   return 0;
 }
 
+// ---------------------------------------------------------------------
+// e1000_recv()
+//   从 RX 描述符环取出硬件已经收到的 mbuf，
+//   把数据交给网络栈 net_rx()，再分配新 mbuf 填到描述符中。
+//
+// 整体流程（参考 E1000 手册 3.2）：
+//   1) 读 E1000_RDT：这是“驱动已经处理过的最后下标”。
+//      下一个等待处理的描述符是 (RDT + 1) % RX_RING_SIZE。
+//   2) 检查 rx_ring[idx].status 是否带 E1000_RXD_STAT_DD：
+//      DD=1 表示硬件已经往这一格的 buffer DMA 完一个包。
+//   3) 更新 mbuf->len = descriptor.length；调用 net_rx(m)
+//      把这一帧交给上层协议栈。
+//   4) 分配一个新 mbuf，把 m->head 写到 descriptor.addr，
+//      并把 descriptor.status 清零。
+//   5) 更新 E1000_RDT 为当前 idx，通知硬件本驱动已经处理完这一格。
+// ---------------------------------------------------------------------
 static void
 e1000_recv(void)
 {
-  //
-  // Your code here.
-  //
-  // Check for packets that have arrived from the e1000
-  // Create and deliver an mbuf for each packet (using net_rx()).
-  //
+  // 加锁：e1000_recv 可能被中断处理调用（e1000_intr），
+  // 也可能和 e1000_transmit（被 net.c 在普通内核线程中调用）并发。
+  // 注意：tx 和 rx 用的 ring 不同，但都要访问 regs[] 寄存器；
+  // e1000_lock 保护整个驱动。
+  acquire(&e1000_lock);
+
+  // 1) 找下一个等待处理的描述符
+  uint32 idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+
+  // 持续取出所有已完成的包
+  while(rx_ring[idx].status & E1000_RXD_STAT_DD){
+    // 2) 取出 mbuf，更新长度
+    struct mbuf *m = rx_mbufs[idx];
+    m->len = rx_ring[idx].length;
+
+    // 3) 把这一帧交给网络栈
+    //    net_rx 内部可能阻塞（在锁外时），但当前持有 e1000_lock；
+    //    本实验 xv6 的 net_rx 不会长时间阻塞。
+    net_rx(m);
+
+    // 4) 分配新的 mbuf 替换之
+    rx_mbufs[idx] = mbufalloc(0);
+    if(!rx_mbufs[idx])
+      panic("e1000_recv");
+    rx_ring[idx].addr = (uint64)rx_mbufs[idx]->head;
+    rx_ring[idx].status = 0;
+
+    // 5) 推进到下一个
+    idx = (idx + 1) % RX_RING_SIZE;
+  }
+
+  // 把 E1000_RDT 更新成"驱动已经处理到的最后一格"
+  // 即刚刚处理过的最后一格的 idx
+  regs[E1000_RDT] = (idx - 1 + RX_RING_SIZE) % RX_RING_SIZE;
+
+  release(&e1000_lock);
 }
 
 void
