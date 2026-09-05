@@ -397,7 +397,6 @@ bmap(struct inode *ip, uint bn)
   bn -= NDIRECT;
 
   if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0){
       addr = balloc(ip->dev);
       if(addr == 0)
@@ -417,6 +416,54 @@ bmap(struct inode *ip, uint bn)
     return addr;
   }
 
+  bn -= NINDIRECT;
+
+  if(bn < NINDIRECT * NINDIRECT){
+    // 双重间接块区域：逻辑块号 bn 对应第 (bn / NINDIRECT) 个
+    // 单间接块，以及该单间接块内的第 (bn % NINDIRECT) 个数据块。
+    uint di = bn / NINDIRECT;
+    uint si = bn % NINDIRECT;
+
+    // 1. 取 inode 中的双重间接块地址，必要时分配。
+    if((addr = ip->addrs[NDIRECT+1]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0)
+        return 0;
+      ip->addrs[NDIRECT+1] = addr;
+    }
+
+    // 2. 把双重间接块读入内存。
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    // 3. 从双重间接块里取第 di 个单间接块地址，必要时分配。
+    if((addr = a[di]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0){
+        brelse(bp);
+        return 0;
+      }
+      a[di] = addr;
+      log_write(bp);
+    }
+    brelse(bp);
+
+    // 4. 把第 di 个单间接块读入内存。
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    // 5. 从单间接块里取第 si 个数据块地址，必要时分配。
+    if((addr = a[si]) == 0){
+      addr = balloc(ip->dev);
+      if(addr){
+        a[si] = addr;
+        log_write(bp);
+      }
+    }
+    brelse(bp);
+    return addr;
+  }
+
   panic("bmap: out of range");
 }
 
@@ -425,7 +472,7 @@ bmap(struct inode *ip, uint bn)
 void
 itrunc(struct inode *ip)
 {
-  int i, j;
+  int i, j, k;
   struct buf *bp;
   uint *a;
 
@@ -446,6 +493,26 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  if(ip->addrs[NDIRECT+1]){
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    for(j = 0; j < NINDIRECT; j++){
+      if(a[j]){
+        struct buf *bp2 = bread(ip->dev, a[j]);
+        uint *a2 = (uint*)bp2->data;
+        for(k = 0; k < NINDIRECT; k++){
+          if(a2[k])
+            bfree(ip->dev, a2[k]);
+        }
+        brelse(bp2);
+        bfree(ip->dev, a[j]);
+      }
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
   }
 
   ip->size = 0;
@@ -644,12 +711,49 @@ skipelem(char *path, char *name)
   return path;
 }
 
+// Follow symbolic links. ip must be locked on entry.
+// Returns the target inode (unlocked, ref=1), or 0 on error.
+// On error, ip is unlocked and its ref is released.
+// Limits recursion depth to 10 to detect cycles.
+static struct inode*
+follow_symlink(struct inode *ip)
+{
+  char buf[BSIZE];
+  int depth = 0;
+
+  while(ip->type == T_SYMLINK && depth < 10){
+    if(ip->size >= sizeof(buf)){
+      iunlockput(ip);
+      return 0;
+    }
+    readi(ip, 0, (uint64)buf, 0, ip->size);
+    buf[ip->size] = 0;
+    iunlockput(ip);
+
+    ip = namei(buf);
+    if(ip == 0)
+      return 0;
+    ilock(ip);
+    depth++;
+  }
+
+  if(ip->type == T_SYMLINK){
+    iunlockput(ip);
+    return 0;
+  }
+
+  iunlock(ip);
+  return ip;
+}
+
 // Look up and return the inode for a path name.
 // If parent != 0, return the inode for the parent and copy the final
 // path element into name, which must have room for DIRSIZ bytes.
 // Must be called inside a transaction since it calls iput().
+// If follow_final is 0, the final path component is not followed if it
+// is a symbolic link.
 static struct inode*
-namex(char *path, int nameiparent, char *name)
+namex(char *path, int nameiparent, char *name, int follow_final)
 {
   struct inode *ip, *next;
 
@@ -674,6 +778,16 @@ namex(char *path, int nameiparent, char *name)
       return 0;
     }
     iunlockput(ip);
+
+    ilock(next);
+    if(next->type == T_SYMLINK && (*path != '\0' || follow_final)){
+      next = follow_symlink(next);
+      if(next == 0)
+        return 0;
+    } else {
+      iunlock(next);
+    }
+
     ip = next;
   }
   if(nameiparent){
@@ -687,11 +801,18 @@ struct inode*
 namei(char *path)
 {
   char name[DIRSIZ];
-  return namex(path, 0, name);
+  return namex(path, 0, name, 1);
+}
+
+struct inode*
+namei_no_follow(char *path)
+{
+  char name[DIRSIZ];
+  return namex(path, 0, name, 0);
 }
 
 struct inode*
 nameiparent(char *path, char *name)
 {
-  return namex(path, 1, name);
+  return namex(path, 1, name, 0);
 }
