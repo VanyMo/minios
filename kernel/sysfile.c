@@ -8,6 +8,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "param.h"
+#include "memlayout.h"
 #include "stat.h"
 #include "spinlock.h"
 #include "proc.h"
@@ -105,6 +106,70 @@ sys_close(void)
   myproc()->ofile[fd] = 0;
   fileclose(f);
   return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr, len, offset;
+  int prot, flags, fd, i;
+  struct file *f;
+  struct proc *p = myproc();
+  struct vma *v;
+
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  if(argfd(4, &fd, &f) < 0)
+    return -1;
+  argaddr(5, &offset);
+
+  if(addr != 0 || len == 0 || offset != 0)
+    return -1;
+  if(prot != PROT_READ && prot != PROT_WRITE && prot != (PROT_READ|PROT_WRITE))
+    return -1;
+  if(flags != MAP_SHARED && flags != MAP_PRIVATE)
+    return -1;
+  if((prot & PROT_READ) && !f->readable)
+    return -1;
+  if((prot & PROT_WRITE) && (flags & MAP_SHARED) && !f->writable)
+    return -1;
+
+  len = PGROUNDUP(len);
+  if(p->sz + len > TRAPFRAME)
+    return -1;
+
+  for(i = 0; i < NVMA; i++){
+    if(!p->vmas[i].used)
+      break;
+  }
+  if(i == NVMA)
+    return -1;
+
+  v = &p->vmas[i];
+  v->used = 1;
+  v->addr = p->sz;
+  v->length = len;
+  v->prot = prot;
+  v->flags = flags;
+  v->offset = offset;
+  v->f = f;
+  filedup(f);
+  p->sz += len;
+  return v->addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr, len;
+
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  if(len == 0)
+    return -1;
+  return vma_unmap(addr, len);
 }
 
 uint64

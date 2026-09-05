@@ -28,6 +28,7 @@ OBJS = \
   $K/pipe.o \
   $K/exec.o \
   $K/sysfile.o \
+  $K/vma.o \
   $K/kernelvec.o \
   $K/plic.o \
   $K/virtio_disk.o
@@ -234,6 +235,11 @@ endif
 ifeq ($(LAB),pgtbl)
 UPROGS += \
 	$U/_pgtbltest
+endif
+
+ifeq ($(LAB),mmap)
+UPROGS += \
+	$U/_mmaptest
 endif
 
 ifeq ($(LAB),lock)

@@ -168,6 +168,7 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  memset(p->vmas, 0, sizeof(p->vmas));
   p->state = UNUSED;
 }
 
@@ -308,6 +309,15 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // copy mapped regions; the child gets its own VMA table
+  // with a reference to each mapped file.
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      np->vmas[i] = p->vmas[i];
+      filedup(p->vmas[i].f);
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -350,6 +360,10 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  // Unmap mapped regions as if munmap had been called,
+  // writing back MAP_SHARED modifications.
+  vma_free_all(p);
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
